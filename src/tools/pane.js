@@ -3,7 +3,7 @@ import { jsonResult } from './_format.js';
 import * as core from '../core/pane.js';
 
 export function registerPaneTools(server) {
-  server.tool('pane_list', 'List all chart panes in the current layout with their symbols and active state', {}, async () => {
+  server.tool('pane_list', 'List all chart panes with their symbols and active state. A collapsed grid still RETAINS hidden charts, so displayed_count (rendered now) and retained_count (held by the layout) can differ; each pane carries a displayed flag.', {}, async () => {
     try { return jsonResult(await core.list()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
