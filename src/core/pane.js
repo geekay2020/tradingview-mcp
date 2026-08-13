@@ -13,6 +13,35 @@ function _resolve(deps) {
   };
 }
 
+/**
+ * In-page helper: which of the RETAINED widgets the grid currently renders.
+ *
+ * Collapsing a grid hides charts without removing them, so `getAll()` (retained)
+ * can be longer than what is on screen. `TradingViewApi.chart(i)` enumerates only
+ * rendered charts, which makes it the authority on what is displayed.
+ *
+ * Expects `all` (the getAll() array) to already be in scope. Defines
+ * `displayedCount` and `isDisplayed(widget, index)`. Shared by list() and focus()
+ * so the two can never disagree about what "displayed" means.
+ */
+const DISPLAYED_PROBE_JS = `
+  var displayedWidgets = [];
+  for (var d = 0; d < all.length; d++) {
+    var ch = null;
+    try { ch = window.TradingViewApi.chart(d); } catch(e) { break; }
+    if (!ch) break;
+    try { displayedWidgets.push(ch._chartWidget || null); } catch(e) { displayedWidgets.push(null); }
+  }
+  var displayedCount = displayedWidgets.length;
+  // Some bundles do not expose _chartWidget; fall back to the grid's prefix
+  // ordering rather than treating every pane as hidden.
+  var haveIdentity = false;
+  for (var h = 0; h < displayedWidgets.length; h++) if (displayedWidgets[h]) { haveIdentity = true; break; }
+  function isDisplayed(widget, i) {
+    return haveIdentity ? (displayedWidgets.indexOf(widget) !== -1) : (i < displayedCount);
+  }
+`;
+
 const LAYOUT_NAMES = {
   's': '1 chart',
   '2h': '2 horizontal',
@@ -55,23 +84,7 @@ export async function list({ _deps } = {}) {
       if (typeof count === 'object' && count && typeof count.value === 'function') count = count.value();
 
       var all = cwc.getAll();
-
-      // TradingViewApi.chart(i) enumerates only the charts the grid RENDERS, so
-      // it is the authority on what is displayed (inlineChartsCount is a plain
-      // number that can go stale mid-relayout). Map each rendered chart back to
-      // its widget so the per-pane flag does not depend on grid ordering.
-      var displayedWidgets = [];
-      for (var d = 0; d < all.length; d++) {
-        var ch = null;
-        try { ch = window.TradingViewApi.chart(d); } catch(e) { break; }
-        if (!ch) break;
-        try { displayedWidgets.push(ch._chartWidget || null); } catch(e) { displayedWidgets.push(null); }
-      }
-      var displayedCount = displayedWidgets.length;
-      // Some bundles do not expose _chartWidget; fall back to the grid's
-      // prefix ordering rather than marking every pane hidden.
-      var haveIdentity = false;
-      for (var h = 0; h < displayedWidgets.length; h++) if (displayedWidgets[h]) { haveIdentity = true; break; }
+      ${DISPLAYED_PROBE_JS}
 
       var panes = [];
       for (var i = 0; i < all.length; i++) {
@@ -81,8 +94,7 @@ export async function list({ _deps } = {}) {
           var mainSeries = model ? model.mainSeries() : null;
           var sym = mainSeries ? mainSeries.symbol() : 'unknown';
           var res = mainSeries ? mainSeries.interval() : null;
-          var shown = haveIdentity ? (displayedWidgets.indexOf(c) !== -1) : (i < displayedCount);
-          panes.push({ index: i, symbol: sym, resolution: res || null, displayed: shown });
+          panes.push({ index: i, symbol: sym, resolution: res || null, displayed: isDisplayed(c, i) });
         } catch(e) { panes.push({ index: i, error: e.message, displayed: i < displayedCount }); }
       }
 
@@ -159,6 +171,13 @@ export async function setLayout({ layout, _deps }) {
 
 /**
  * Focus a specific pane by index.
+ *
+ * Only a DISPLAYED pane can be focused: a retained-but-hidden chart has no
+ * rendered _mainDiv to click, so the old code's click was a no-op that still
+ * reported success. That silent failure was dangerous through setSymbol(),
+ * which focuses and then writes to whatever chart is currently active — so a
+ * write aimed at a hidden pane landed on the wrong one. Refuse instead, and
+ * report whether the focus actually took.
  */
 export async function focus({ index, _deps }) {
   const { evaluate } = _resolve(_deps);
@@ -167,16 +186,52 @@ export async function focus({ index, _deps }) {
     (function() {
       var cwc = ${CWC};
       var all = cwc.getAll();
-      if (${idx} >= all.length) return { error: 'Pane index ' + ${idx} + ' out of range (have ' + all.length + ' panes)' };
-      var chart = all[${idx}];
-      // Click the main div to activate it
-      if (chart._mainDiv) chart._mainDiv.click();
-      return { focused: ${idx}, total: all.length };
+      ${DISPLAYED_PROBE_JS}
+      var idx = ${idx};
+      if (!(idx >= 0) || idx >= all.length) return { error: 'out_of_range', retained: all.length, displayed: displayedCount };
+      var chart = all[idx];
+      if (!isDisplayed(chart, idx)) return { error: 'not_displayed', retained: all.length, displayed: displayedCount };
+      // A displayed pane must have a rendered div to click; if it does not, say
+      // so rather than returning a success the caller cannot rely on.
+      if (!chart._mainDiv) return { error: 'not_clickable', retained: all.length, displayed: displayedCount };
+      chart._mainDiv.click();
+
+      // Read back which pane actually became active, so the caller can trust it.
+      var active = window.TradingViewApi._activeChartWidgetWV.value();
+      var activeIndex = null;
+      for (var j = 0; j < all.length; j++) {
+        try {
+          if (active && active._chartWidget && all[j] === active._chartWidget) { activeIndex = j; break; }
+        } catch(e) {}
+      }
+      return { focused: idx, active_index: activeIndex, retained: all.length, displayed: displayedCount };
     })()
   `);
 
+  if (result?.error === 'out_of_range') {
+    throw new Error(`Pane index ${idx} out of range — the layout retains ${result.retained} chart(s)`);
+  }
+  if (result?.error === 'not_displayed') {
+    throw new Error(
+      `Pane index ${idx} is retained but NOT displayed — the current grid renders only ${result.displayed} of ${result.retained} chart(s), ` +
+      `so it cannot be focused. Reveal it first with pane_set_layout (e.g. "4"), then focus.`
+    );
+  }
+  if (result?.error === 'not_clickable') {
+    throw new Error(`Pane index ${idx} reports as displayed but has no clickable element — cannot focus it`);
+  }
   if (result?.error) throw new Error(result.error);
-  return { success: true, focused_index: result.focused, total_panes: result.total };
+
+  return {
+    success: true,
+    focused_index: result.focused,
+    active_index: result.active_index,
+    // False means the click did not move focus — callers that are about to
+    // WRITE to the active chart must not proceed on a false here.
+    focus_confirmed: result.active_index === result.focused,
+    displayed_count: result.displayed,
+    retained_count: result.retained,
+  };
 }
 
 /**
@@ -187,8 +242,15 @@ export async function setSymbol({ index, symbol, _deps }) {
   const { evaluateAsync } = _resolve(_deps);
   const idx = Number(index);
 
-  // Focus the target pane first
-  await focus({ index: idx, _deps });
+  // Focus the target pane first. focus() throws for a hidden or out-of-range
+  // pane, which is what stops this write from landing on the wrong chart.
+  const focused = await focus({ index: idx, _deps });
+  if (!focused.focus_confirmed) {
+    throw new Error(
+      `Refusing to set symbol on pane ${idx}: focus did not take (active pane is ${focused.active_index}). ` +
+      `Writing now would change the wrong pane.`
+    );
+  }
   await new Promise(r => setTimeout(r, 300));
 
   // Now set symbol on the now-active chart

@@ -15,54 +15,12 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import vm from 'node:vm';
 import { list } from '../src/core/pane.js';
-
-/**
- * Fake TradingView page: the collection RETAINS every entry in `retained`, of
- * which only the first `displayed` are rendered by the current grid. That
- * prefix rule mirrors how TradingView collapses a grid.
- */
-function fakePage({ layoutType, displayed, retained, exposeWidgetIdentity = true }) {
-  const widgets = retained.map((r) => ({
-    model: () => ({
-      mainSeries: () => ({ symbol: () => r.symbol, interval: () => r.resolution }),
-    }),
-  }));
-  const window = {
-    TradingViewApi: {
-      _chartWidgetCollection: {
-        _layoutType: layoutType,
-        inlineChartsCount: displayed,
-        getAll: () => widgets,
-      },
-      // Only DISPLAYED charts are reachable here. This is the authority the
-      // operator notes tell you to trust over pane_list.
-      chart: (i) =>
-        i < displayed
-          ? (exposeWidgetIdentity ? { _chartWidget: widgets[i] } : {})
-          : null,
-      _activeChartWidgetWV: { value: () => ({ _chartWidget: widgets[0] }) },
-    },
-  };
-  // The real evaluate() crosses CDP with returnByValue, i.e. the result comes
-  // back as plain JSON in the host realm. Round-trip through JSON so the fake
-  // matches that contract (and so vm's cross-realm prototypes don't leak out).
-  return {
-    evaluate: async (expr) => JSON.parse(JSON.stringify(vm.runInNewContext(expr, { window }))),
-  };
-}
-
-const VC1_RETAINED = [
-  { symbol: 'NSE:NIFTY', resolution: '10S' },
-  { symbol: 'NSE:NIFTY1!', resolution: '10S' },
-  { symbol: 'NSE:NIFTY260818C24450', resolution: '10S' },
-  { symbol: 'NSE:NIFTY260818P24400', resolution: '10S' },
-];
+import { fakePage, VC1_RETAINED } from './helpers/pane-page.js';
 
 describe('pane list() — collapsed grid retaining hidden charts', () => {
   it('reports displayed and retained counts separately instead of contradicting itself', async () => {
-    const _deps = fakePage({ layoutType: 's', displayed: 1, retained: VC1_RETAINED });
+    const { _deps } = fakePage({ layoutType: 's', displayed: 1, retained: VC1_RETAINED });
     const r = await list({ _deps });
 
     assert.equal(r.success, true);
@@ -76,7 +34,7 @@ describe('pane list() — collapsed grid retaining hidden charts', () => {
   });
 
   it('marks exactly the rendered pane as displayed', async () => {
-    const _deps = fakePage({ layoutType: 's', displayed: 1, retained: VC1_RETAINED });
+    const { _deps } = fakePage({ layoutType: 's', displayed: 1, retained: VC1_RETAINED });
     const r = await list({ _deps });
 
     assert.deepEqual(
@@ -89,7 +47,7 @@ describe('pane list() — collapsed grid retaining hidden charts', () => {
   });
 
   it('keeps chart_count as a back-compat alias of displayed_count', async () => {
-    const _deps = fakePage({ layoutType: 's', displayed: 1, retained: VC1_RETAINED });
+    const { _deps } = fakePage({ layoutType: 's', displayed: 1, retained: VC1_RETAINED });
     const r = await list({ _deps });
     // chart_count has always meant inlineChartsCount (= displayed). Callers
     // such as setLayout() and any external MCP consumer keep their meaning.
@@ -100,7 +58,7 @@ describe('pane list() — collapsed grid retaining hidden charts', () => {
   it('falls back to grid ordering when widget identity is unavailable', async () => {
     // Some TradingView bundles do not expose `_chartWidget`; the displayed flag
     // must still be right rather than silently marking everything hidden.
-    const _deps = fakePage({
+    const { _deps } = fakePage({
       layoutType: 's', displayed: 1, retained: VC1_RETAINED, exposeWidgetIdentity: false,
     });
     const r = await list({ _deps });
@@ -111,7 +69,7 @@ describe('pane list() — collapsed grid retaining hidden charts', () => {
 
 describe('pane list() — fully displayed grid', () => {
   it('reports displayed == retained when the grid shows every chart', async () => {
-    const _deps = fakePage({ layoutType: '4', displayed: 4, retained: VC1_RETAINED });
+    const { _deps } = fakePage({ layoutType: '4', displayed: 4, retained: VC1_RETAINED });
     const r = await list({ _deps });
 
     assert.equal(r.layout, '4');
@@ -122,13 +80,13 @@ describe('pane list() — fully displayed grid', () => {
   });
 
   it('still resolves the active pane index', async () => {
-    const _deps = fakePage({ layoutType: '4', displayed: 4, retained: VC1_RETAINED });
+    const { _deps } = fakePage({ layoutType: '4', displayed: 4, retained: VC1_RETAINED });
     const r = await list({ _deps });
     assert.equal(r.active_index, 0);
   });
 
   it('carries symbol and resolution through unchanged', async () => {
-    const _deps = fakePage({ layoutType: '4', displayed: 4, retained: VC1_RETAINED });
+    const { _deps } = fakePage({ layoutType: '4', displayed: 4, retained: VC1_RETAINED });
     const r = await list({ _deps });
     assert.deepEqual(r.panes.map((p) => p.symbol), VC1_RETAINED.map((v) => v.symbol));
     assert.ok(r.panes.every((p) => p.resolution === '10S'));
