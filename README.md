@@ -43,6 +43,31 @@ The refusal is not retried.
 export TV_DENY_LAYOUTS=z5PmbOrC
 ```
 
+## Audit Log
+
+This MCP changes symbols, adds and removes studies, writes and saves Pine, and
+creates alerts on a live chart. Set `TV_AUDIT_LOG` to keep a record of what a
+session did:
+
+```bash
+export TV_AUDIT_LOG=~/.tradingview-mcp/tool-calls.jsonl
+```
+
+One JSON object per line:
+
+```json
+{"ts":"2026-08-31T15:43:57.221Z","tool":"pine_analyze","args":{"source":"//@version=5..."},"ok":true,"ms":2}
+```
+
+Disabled unless the variable is set — no file, no wrapper, no overhead.
+
+**Arguments are recorded, results are not.** A result can be a 200KB Pine source
+or a screenshot payload; the log answers what was *asked for*, not what came
+back. Long strings are truncated with a note of how much was dropped, so a large
+`pine_set_source` argument does not bloat the log. Failures are recorded whether
+the tool threw or returned `success: false`. A write failure never breaks the
+call being audited.
+
 ## What This Tool Does Not Do
 
 - Connect to TradingView's servers or APIs
