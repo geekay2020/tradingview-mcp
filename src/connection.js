@@ -64,6 +64,15 @@ export async function getClient() {
   return connect();
 }
 
+/**
+ * Mark an error as "do not retry". A denied target is a decision, not a
+ * transient fault — spinning through the backoff just delays the message.
+ */
+function fatal(err) {
+  err.fatal = true;
+  return err;
+}
+
 export async function connect(targetId = null) {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -85,6 +94,7 @@ export async function connect(targetId = null) {
       return client;
     } catch (err) {
       lastError = err;
+      if (err.fatal) throw err;
       const delay = Math.min(BASE_DELAY * Math.pow(2, attempt), 30000);
       await new Promise(r => setTimeout(r, delay));
     }
@@ -107,13 +117,81 @@ export async function reconnectTo(targetId) {
   return connect(targetId);
 }
 
+/**
+ * URL marker that identifies a tab as belonging to this MCP. Open a chart with
+ * `?tvmcp=1` appended and the MCP will prefer it over every other TradingView
+ * tab, leaving the operator's own charts alone.
+ */
+export const TAB_MARKER = process.env.TV_TAB_MARKER || 'tvmcp=1';
+
+/**
+ * Comma-separated substrings (layout ids, symbols, whatever appears in the URL)
+ * that this MCP must never attach to. Empty by default. A target matching any
+ * entry is removed from consideration entirely — we do NOT silently fall
+ * through to the next tab, because "connected to something else" is exactly the
+ * failure this guard exists to prevent.
+ */
+export function deniedPatterns() {
+  return (process.env.TV_DENY_LAYOUTS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Pick which CDP target to drive, out of everything Chrome reports.
+ *
+ * Pure and exported so the selection rules can be tested without a browser.
+ *
+ * Order of preference:
+ *   1. drop anything matching a denied pattern (never reconsidered)
+ *   2. prefer tabs carrying the MCP marker
+ *   3. prefer real chart URLs (tradingview.com/chart) over any tradingview page
+ *   4. first remaining match
+ *
+ * Returns { target, blocked, marked } so the caller can tell "nothing was open"
+ * apart from "the only thing open was off limits" — two situations that need
+ * very different error messages.
+ */
+export function selectChartTarget(targets, opts = {}) {
+  const marker = opts.marker ?? '';
+  const deny = opts.deny ?? [];
+
+  const tv = (targets || []).filter(
+    t => t && t.type === 'page' && typeof t.url === 'string' && /tradingview/i.test(t.url)
+  );
+
+  const blocked = deny.length
+    ? tv.filter(t => deny.some(d => t.url.includes(d)))
+    : [];
+  const allowed = tv.filter(t => !blocked.includes(t));
+
+  // A marked tab wins even if it is not a /chart/ URL — the operator pointed at
+  // it deliberately, and that intent outranks our own URL heuristics.
+  const marked = marker ? allowed.filter(t => t.url.includes(marker)) : [];
+  const pool = marked.length ? marked : allowed;
+
+  const charts = pool.filter(t => /tradingview\.com\/chart/i.test(t.url));
+  const target = (charts.length ? charts : pool)[0] || null;
+
+  return { target, blocked, marked: marked.length > 0 };
+}
+
 async function findChartTarget() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
-  // Prefer targets with tradingview.com/chart in the URL
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-    || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
-    || null;
+  const deny = deniedPatterns();
+  const { target, blocked } = selectChartTarget(targets, { marker: TAB_MARKER, deny });
+
+  if (!target && blocked.length) {
+    const urls = blocked.map(t => t.url).join(', ');
+    throw fatal(new Error(
+      `Refusing to attach: the only TradingView target(s) open match TV_DENY_LAYOUTS `
+      + `(${deny.join(', ')}). Blocked: ${urls}. `
+      + `Open a separate chart tab with ${TAB_MARKER} in its URL.`
+    ));
+  }
+  return target;
 }
 
 async function findTargetById(id) {
