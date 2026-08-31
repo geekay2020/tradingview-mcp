@@ -22,6 +22,27 @@ This tool does not connect to TradingView's servers, modify any TradingView file
 
 The debug port is disabled by default and must be explicitly enabled by you using a standard Chromium flag (`--remote-debugging-port=9222`). Nothing happens without that deliberate step.
 
+## Choosing Which Chart It Drives
+
+With several TradingView layouts open at once, target selection is otherwise
+first-wins — an MCP call can land on a chart you are actively trading from. Two
+optional guards, both off unless configured:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TV_TAB_MARKER` | `tvmcp=1` | The MCP **prefers** any tab whose URL contains this marker. Open a scratch chart with `?tvmcp=1` appended and your other charts are left alone. |
+| `TV_DENY_LAYOUTS` | *(empty)* | Comma-separated URL substrings (layout ids) the MCP must **never** attach to. |
+
+`TV_DENY_LAYOUTS` fails closed: a denied target is dropped and never
+reconsidered. If it is the only thing open, the connection is refused with an
+error naming the blocked URL rather than quietly falling through to another tab.
+The refusal is not retried.
+
+```bash
+# never touch the live layout; prefer a scratch tab opened with ?tvmcp=1
+export TV_DENY_LAYOUTS=z5PmbOrC
+```
+
 ## What This Tool Does Not Do
 
 - Connect to TradingView's servers or APIs
