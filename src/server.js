@@ -14,6 +14,7 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { withAudit } from './audit.js';
 
 const server = new McpServer(
   {
@@ -68,6 +69,10 @@ CONTEXT MANAGEMENT:
 - Call chart_get_state ONCE at start, reuse entity IDs`,
   }
 );
+
+// Audit every tool registered from here on (no-op unless TV_AUDIT_LOG is set).
+// Must wrap BEFORE the register* calls below, since it decorates server.tool.
+withAudit(server);
 
 // Register all tool groups
 registerHealthTools(server);
